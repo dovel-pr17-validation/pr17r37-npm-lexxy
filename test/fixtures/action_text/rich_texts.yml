@@ -1,0 +1,17 @@
+hello_world:
+  record: hello_world (Post)
+  name: body
+  body:
+    <p>Hello everyone</p>
+
+hello_james:
+  record: hello_james (Post)
+  name: body
+  body:
+    <p>Hello <%= ActionText::FixtureSet.attachment("people", :james) %></p>
+
+linked_code:
+  record: linked_code (Post)
+  name: body
+  body:
+    <pre data-language="javascript">const a = 1<br>see <a href="https://example.com/">the docs</a> here</pre>

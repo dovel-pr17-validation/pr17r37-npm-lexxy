@@ -1,0 +1,416 @@
+import { isAutolinkableURL } from "../helpers/string_helper"
+import { parsePastedMarkdown } from "../helpers/markdown_helper"
+import { nextFrame } from "../helpers/timing_helper"
+import { addBlockSpacing, dispatch, parseHtml } from "../helpers/html_helper"
+import { $isCodeNode } from "@lexical/code"
+import { $createTextNode, $getSelection, $isParagraphNode, $isRangeSelection, $isTextNode, $onUpdate, COMMAND_PRIORITY_NORMAL, PASTE_COMMAND, PASTE_TAG, SELECTION_INSERT_CLIPBOARD_NODES_COMMAND } from "lexical"
+import { $createLinkNode, $isLinkNode, $toggleLink } from "@lexical/link"
+import { $findMatchingParent } from "@lexical/utils"
+import { ListenerBin } from "../helpers/listener_helper"
+import NodeInserter from "./contents/node_inserter"
+import { filterDisallowedAttachmentNodes } from "../helpers/attachment_filter_helper"
+import NestedBlockNodeInserter from "./contents/node_inserter/nested_block_node_inserter"
+
+const CODE_EDITOR_PROSE_LANGUAGES = [ "markdown", "plaintext" ]
+
+// The `[text](` that opens a Markdown inline link, matching the link text the
+// way Lexical's LINK transformer does (one level of nested brackets).
+const MARKDOWN_LINK_DESTINATION_START = /\[[^[\]]*(?:\[[^[\]]*\][^[\]]*)*\]\($/
+
+export default class Clipboard {
+  #listeners = new ListenerBin()
+
+  constructor(editorElement) {
+    this.editorElement = editorElement
+    this.editor = editorElement.editor
+    this.contents = editorElement.contents
+
+    this.#registerPasteCommands()
+  }
+
+  dispose() {
+    this.editorElement = null
+    this.editor = null
+    this.contents = null
+
+    this.#listeners.dispose()
+  }
+
+  paste(event) {
+    const clipboardData = event.clipboardData
+
+    if (!clipboardData) return false
+
+    if (this.#isPastingIntoCodeBlock()) {
+      this.#pastePlainTextIntoCodeBlock(clipboardData)
+      event.preventDefault()
+      return true
+    }
+
+    if (this.#isPlainTextOrURLPasted(clipboardData)) {
+      this.#pastePlainTextOrURL(clipboardData)
+      event.preventDefault()
+      return true
+    }
+
+    if (this.#isUnregisteredLexicalDataWithHtml(clipboardData)) {
+      this.contents.insertHtml(clipboardData.getData("text/html"), { tag: PASTE_TAG })
+      event.preventDefault()
+      return true
+    }
+
+    const handled = this.#handlePastedFiles(clipboardData)
+    if (handled) event.preventDefault()
+    return handled
+  }
+
+  #registerPasteCommands() {
+    this.#listeners.track(
+      this.editor.registerCommand(PASTE_COMMAND, this.paste.bind(this), COMMAND_PRIORITY_NORMAL),
+      this.editor.registerCommand(
+        SELECTION_INSERT_CLIPBOARD_NODES_COMMAND,
+        (payload) => this.#handleParsedClipboardNodes(payload),
+        COMMAND_PRIORITY_NORMAL
+      )
+    )
+  }
+
+  #handleParsedClipboardNodes({ nodes, selection }) {
+    // Lexical inserts this same array when no handler claims the command, and nodes it rebuilt
+    // from another editor's clipboard JSON haven't been through the import filter yet.
+    nodes.splice(0, nodes.length, ...filterDisallowedAttachmentNodes(nodes, this.editorElement))
+
+    const url = $bareUrlFromSingleLink(nodes)
+    if (url && $isRangeSelection(selection)) {
+      if (this.editorElement.supportsMarkdown && $isInMarkdownLinkDestination(selection)) {
+        selection.insertText(url)
+      } else {
+        this.#insertSingleLinkAt(selection, url)
+      }
+      return true
+    }
+
+    if (NestedBlockNodeInserter.handles(selection)) {
+      new NestedBlockNodeInserter(selection).insertNodes(nodes)
+      return true
+    }
+  }
+
+  #isPlainTextOrURLPasted(clipboardData) {
+    return this.#isOnlyPlainTextPasted(clipboardData)
+      || this.#isOnlyURLPasted(clipboardData)
+      || this.#isProseCopiedFromCodeEditor(clipboardData)
+  }
+
+  #isOnlyPlainTextPasted(clipboardData) {
+    const types = Array.from(clipboardData.types)
+    return types.length === 1 && types[0] === "text/plain"
+  }
+
+  // Browsers expose a copied URL in several shapes:
+  //   Safari          [ text/plain, text/uri-list ]
+  //   App ShareSheet  [ text/uri-list ]
+  //   Chromium macOS  [ text/plain, text/html, (?:text/link-preview) ]
+  #isOnlyURLPasted(clipboardData) {
+    if (this.#isLexicalClipboardData(clipboardData)) return false
+
+    const types = Array.from(clipboardData.types)
+    if (types.includes("text/uri-list")) {
+      return types.every(type => type === "text/plain" || type === "text/uri-list")
+    }
+
+    if (clipboardData.files.length) return false
+
+    const text = clipboardData.getData("text/plain").trim()
+    if (!isAutolinkableURL(text)) return false
+
+    const html = clipboardData.getData("text/html")
+    return !html || this.#htmlIsBareLinkToURL(html, text)
+  }
+
+  // VS Code, and editors built on it such as Cursor, copy syntax-highlighted HTML next to the
+  // plain text, which pastes as a code block. That suits source code, but Markdown or plain text
+  // copied from them should paste as plain text, so the Markdown converts. The editor names the
+  // file's language in vscode-editor-data, which Chromium-based browsers expose.
+  #isProseCopiedFromCodeEditor(clipboardData) {
+    const types = Array.from(clipboardData.types)
+    if (!types.includes("vscode-editor-data") || !types.includes("text/plain")) return false
+
+    try {
+      const { mode } = JSON.parse(clipboardData.getData("vscode-editor-data"))
+      return CODE_EDITOR_PROSE_LANGUAGES.includes(mode)
+    } catch {
+      return false
+    }
+  }
+
+  #htmlIsBareLinkToURL(html, url) {
+    const doc = parseHtml(html)
+    if (doc.body.textContent.trim() !== url) return false
+
+    const links = doc.body.querySelectorAll("a")
+    if (links.length === 0) return true
+    return links.length === 1 && links[0].getAttribute("href") === url
+  }
+
+  // Lexical data copied from an editor with more features than this one, such as
+  // a table copied into an editor with tables disabled, has nodes this editor
+  // doesn't register. Lexical would log an error before falling back to the HTML,
+  // so paste the HTML straight away.
+  #isUnregisteredLexicalDataWithHtml(clipboardData) {
+    return clipboardData.getData("text/html") && this.#hasUnregisteredLexicalNodes(clipboardData)
+  }
+
+  #hasUnregisteredLexicalNodes(clipboardData) {
+    try {
+      const { nodes } = JSON.parse(clipboardData.getData("application/x-lexical-editor"))
+      return nodes.some(node => !this.#isRegisteredSerializedNode(node))
+    } catch {
+      return false
+    }
+  }
+
+  #isRegisteredSerializedNode({ type, children = [] }) {
+    return this.editor._nodes.has(type) && children.every(child => this.#isRegisteredSerializedNode(child))
+  }
+
+  #isPastingIntoCodeBlock() {
+    let result = false
+
+    this.editor.getEditorState().read(() => {
+      const selection = $getSelection()
+      if (!$isRangeSelection(selection)) return
+
+      let currentNode = selection.anchor.getNode()
+
+      while (currentNode) {
+        if ($isCodeNode(currentNode)) {
+          result = true
+          return
+        }
+        currentNode = currentNode.getParent()
+      }
+    })
+
+    return result
+  }
+
+  #pastePlainTextIntoCodeBlock(clipboardData) {
+    const text = clipboardData.getData("text/plain")
+    if (!text) return
+
+    this.editor.update(() => {
+      const selection = $getSelection()
+      if ($isRangeSelection(selection)) selection.insertRawText(text)
+    }, { tag: PASTE_TAG })
+  }
+
+  #pastePlainTextOrURL(clipboardData) {
+    const item = this.#plainTextOrURLItem(clipboardData)
+    item.getAsString((text) => {
+      const url = text.trim()
+      if (this.editorElement.supportsRichText && isAutolinkableURL(url)) {
+        this.#pasteURL(url)
+      } else if (this.editorElement.supportsMarkdown) {
+        this.#pasteMarkdown(text)
+      } else {
+        this.contents.insertText(text, { tag: PASTE_TAG })
+      }
+    })
+  }
+
+  #isCaretInMarkdownLinkDestination() {
+    if (!this.editorElement.supportsMarkdown) return false
+
+    return this.editor.getEditorState().read(() => $isInMarkdownLinkDestination($getSelection()))
+  }
+
+  #pasteURLAsText(url) {
+    this.editor.update(() => {
+      const selection = $getSelection()
+      if ($isRangeSelection(selection)) selection.insertText(url)
+    }, { tag: PASTE_TAG })
+  }
+
+  #plainTextOrURLItem(clipboardData) {
+    const items = Array.from(clipboardData.items)
+    return items.find((item) => item.type === "text/plain") || items.find((item) => item.type === "text/uri-list")
+  }
+
+  #pasteURL(url) {
+    if (this.contents.hasSelectedText()) {
+      this.contents.createLinkWithSelectedText(url)
+    } else if (this.#isCaretInMarkdownLinkDestination()) {
+      this.#pasteURLAsText(url)
+    } else {
+      const nodeKey = this.contents.createLink(url)
+      this.#dispatchLinkInsertEvent(nodeKey, { url })
+    }
+  }
+
+  #insertSingleLinkAt(selection, url) {
+    if (!$isRangeSelection(selection)) return
+
+    if (!selection.isCollapsed()) {
+      $toggleLink(null)
+      $toggleLink(url)
+      return
+    }
+
+    const linkNode = $createLinkNode(url).append($createTextNode(url))
+    NodeInserter.for(selection).insertNodes([ linkNode ])
+
+    $onUpdate(() => this.#dispatchLinkInsertEvent(linkNode.getKey(), { url }))
+  }
+
+  #dispatchLinkInsertEvent(nodeKey, payload) {
+    const linkManipulationMethods = {
+      replaceLinkWith: (html, options) => this.contents.replaceNodeWithHTML(nodeKey, html, options),
+      insertBelowLink: (html, options) => this.contents.insertHTMLBelowNode(nodeKey, html, options)
+    }
+
+    dispatch(this.editorElement, "lexxy:insert-link", {
+      ...payload,
+      ...linkManipulationMethods
+    })
+  }
+
+  #pasteMarkdown(text) {
+    if (!text) return
+
+    const html = parsePastedMarkdown(text)
+    const doc = parseHtml(html)
+
+    if (this.#isPlainTextWithoutMarkdown(doc) || this.#renderedNothing(doc)) {
+      this.contents.insertText(text, { tag: PASTE_TAG })
+    } else {
+      const detail = Object.freeze({
+        markdown: text,
+        document: doc,
+        addBlockSpacing: () => addBlockSpacing(doc)
+      })
+
+      dispatch(this.editorElement, "lexxy:insert-markdown", detail)
+      this.contents.insertDOM(doc, { tag: PASTE_TAG })
+    }
+  }
+
+  // Markdown conversion collapses runs of whitespace and unescapes backslashes,
+  // silently corrupting plain text such as Windows/UNC file paths. When the text
+  // carries no Markdown structure, paste it verbatim instead. A path that wrapped
+  // across lines renders as a single paragraph with <br> line breaks (marked runs
+  // with breaks: true), which is still plain text we should preserve untouched.
+  #isPlainTextWithoutMarkdown(doc) {
+    const elements = Array.from(doc.body.children)
+    if (elements.length !== 1) return false
+
+    const paragraph = elements[0]
+    return paragraph.nodeName === "P"
+      && Array.from(paragraph.childNodes).every((node) => node.nodeType === Node.TEXT_NODE || node.nodeName === "BR")
+  }
+
+  // Markdown constructs that carry no output of their own, such as footnote and
+  // link reference definitions or HTML comments, leave marked with an empty
+  // document. Inserting that discards the paste, so keep the raw text instead.
+  #renderedNothing(doc) {
+    return doc.body.children.length === 0 && doc.body.textContent.trim() === ""
+  }
+
+  #handlePastedFiles(clipboardData) {
+    if (this.editorElement.supportsAttachments) {
+      const html = clipboardData.getData("text/html")
+      const files = clipboardData.files
+      const copiedImage = files.length && this.#copiedImage(html)
+
+      if (copiedImage) {
+        this.#uploadFilesPreservingScroll(files, copiedImage.getAttribute("alt"))
+        return true
+      } else if (html && !this.#isLexicalClipboardData(clipboardData)) {
+        this.contents.insertHtml(html, { tag: PASTE_TAG })
+        return true
+      } else if (files.length) {
+        this.#uploadFilesPreservingScroll(files)
+        return true
+      } else {
+        return false
+      }
+    } else {
+      return false
+    }
+  }
+
+  #isLexicalClipboardData(clipboardData) {
+    return Array.from(clipboardData.types).includes("application/x-lexical-editor")
+  }
+
+  #copiedImage(html) {
+    if (html) {
+      const doc = parseHtml(html)
+      const elementChildren = Array.from(doc.body.children)
+
+      if (elementChildren.length === 1 && elementChildren[0].tagName === "IMG") {
+        return elementChildren[0]
+      } else {
+        return null
+      }
+    } else {
+      return null
+    }
+  }
+
+  #uploadFilesPreservingScroll(files, altText) {
+    this.#preservingScrollPosition(() => {
+      if (files.length) {
+        this.contents.uploadFiles(files, { selectLast: true, altText })
+      }
+    })
+  }
+
+  // Deals with an issue in Safari where it scrolls to the tops after pasting attachments
+  async #preservingScrollPosition(callback) {
+    const scrollY = window.scrollY
+    const scrollX = window.scrollX
+
+    callback()
+
+    await nextFrame()
+
+    window.scrollTo(scrollX, scrollY)
+    this.editor.focus()
+  }
+}
+
+function $bareUrlFromSingleLink(nodes) {
+  if (nodes.length !== 1) return null
+
+  const node = nodes[0]
+  if ($isLinkNode(node)) return $bareUrlFromLink(node)
+
+  if ($isParagraphNode(node)) {
+    const children = node.getChildren()
+    if (children.length === 1 && $isLinkNode(children[0])) {
+      return $bareUrlFromLink(children[0])
+    }
+  }
+
+  return null
+}
+
+function $bareUrlFromLink(linkNode) {
+  const url = linkNode.getURL()
+  if (!url) return null
+  return linkNode.getTextContent() === url ? url : null
+}
+
+// Typing `[text](`, pasting the URL and typing `)` should produce a link through
+// the Markdown link shortcut. That shortcut only matches plain text, so a URL
+// pasted there stays plain text instead of becoming a link of its own.
+function $isInMarkdownLinkDestination(selection) {
+  if (!$isRangeSelection(selection) || !selection.isCollapsed()) return false
+
+  const node = selection.anchor.getNode()
+  if (!$isTextNode(node) || $findMatchingParent(node, $isLinkNode)) return false
+
+  const textBeforeCaret = node.getTextContent().slice(0, selection.anchor.offset)
+  return MARKDOWN_LINK_DESTINATION_START.test(textBeforeCaret)
+}

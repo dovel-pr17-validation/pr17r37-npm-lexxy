@@ -1,0 +1,11 @@
+empty:
+  title: "A post without rich text record"
+
+hello_world:
+  title: "Hello World"
+
+hello_james:
+  title: "Hello James"
+
+linked_code:
+  title: "Linked code"

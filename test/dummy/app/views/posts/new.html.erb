@@ -1,0 +1,9 @@
+<div class="container">
+  <%= link_to "← Back to posts", posts_path, class: "btn" %>
+
+  <h1>New post</h1>
+
+  <article class="post">
+    <%= render "form", post: @post %>
+  </article>
+</div>

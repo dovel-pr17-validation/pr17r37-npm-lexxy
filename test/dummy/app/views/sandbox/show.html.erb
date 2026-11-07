@@ -1,0 +1,45 @@
+<% content_for :title, "Lexxy Sandbox" %>
+
+<main
+  data-controller="lexxy-output history" 
+  data-action="lexxy:change->lexxy-output#refresh turbo:frame-load->history#pushFromFrameLoad"
+>
+  <section class="input">
+    <h2>Editor</h2>
+
+    <div class="editor-value-buttons">
+      <a class="button" href="/sandbox" data-turbo-frame="editor">Default</a>
+      <a class="button" href="/sandbox/tables" data-turbo-frame="editor">Tables</a>
+      <a class="button" href="/sandbox/code" data-turbo-frame="editor">Code blocks</a>
+      <a class="button" href="/sandbox/lists" data-turbo-frame="editor">Lists</a>
+      <a class="button" href="/sandbox/highlights" data-turbo-frame="editor">Text Highlights</a>
+      <a class="button" href="/sandbox/images" data-turbo-frame="editor">Images</a>
+      <a class="button" href="/sandbox/empty" data-turbo-frame="editor">Empty</a>
+    </div>
+
+    <turbo-frame id="editor" target="_top">
+      <div>
+        <%= rich_text_area_tag :sandbox, render(@template), placeholder: "Write something...", data: { lexxy_output_target: "editor" } do %>
+          <lexxy-prompt trigger="@" src="<%= people_path %>" name="mention"></lexxy-prompt>
+          <%= render "emoji_prompt", trigger: ":" %>
+        <% end %>
+      </div>
+    </turbo-frame>
+
+    <p><small>Use @ and : to see a remote and local prompt implementation.</small></p>
+  </section>
+
+  <section class="output">
+    <h2>Output</h2>
+    <div>
+      <details name="lexxy-output">
+        <summary>Plain Text</summary>
+        <pre data-lexxy-output-target="outputText" class="lexxy-content"></pre>
+      </details>
+      <details name="lexxy-output" open>
+        <summary>HTML</summary>
+        <pre data-lexxy-output-target="outputHtml" class="lexxy-content"></pre>
+      </details>
+    </div>
+  </section>
+</main>

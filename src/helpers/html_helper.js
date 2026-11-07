@@ -1,0 +1,111 @@
+export function createElement(name, properties, content = "") {
+  const element = document.createElement(name)
+  for (const [ key, value ] of Object.entries(properties || {})) {
+    if (key === "dataset") {
+      Object.entries(value).forEach(([ key, value ]) => (element.dataset[key] = value))
+    } else if (key in element) {
+      element[key] = value
+    } else if (value !== null && value !== undefined) {
+      element.setAttribute(key, value)
+    }
+  }
+  if (content) {
+    element.innerHTML = content
+  }
+  return element
+}
+
+export function parseHtml(html) {
+  const parser = new DOMParser()
+  return parser.parseFromString(html, "text/html")
+}
+
+export function createAttachmentFigure(contentType, isPreviewable, fileName) {
+  const extension = fileName ? fileName.split(".").pop().toLowerCase() : "unknown"
+  return createElement("figure", {
+    className: `attachment attachment--${isPreviewable ? "preview" : "file"} attachment--${extension}`,
+    "data-content-type": contentType
+  })
+}
+
+export function isPreviewableImage(contentType) {
+  return contentType.startsWith("image/") && !contentType.includes("svg")
+}
+
+export function dispatchCustomEvent(element, name, detail) {
+  const event = new CustomEvent(name, {
+    detail: detail,
+    bubbles: true,
+  })
+  element.dispatchEvent(event)
+}
+
+export function dispatch(element, eventName, detail = null, cancelable = false) {
+  return element.dispatchEvent(new CustomEvent(eventName, { bubbles: true, detail, cancelable }))
+}
+
+export function addBlockSpacing(doc) {
+  const selector = "body > :not(h1, h2, h3, h4, h5, h6) + *, blockquote > :not(h1, h2, h3, h4, h5, h6) + *"
+  for (const block of doc.querySelectorAll(selector)) {
+    const spacer = doc.createElement("p")
+    spacer.appendChild(doc.createElement("br"))
+    block.before(spacer)
+  }
+}
+
+// A trailing newline before </pre> is presentational: markdown renderers routinely
+// emit one, and the HTML spec similarly disregards a leading newline right after <pre>.
+// Left in place, it imports as a spurious blank last line in the code block. Only a
+// newline that ends the block is stripped; one followed by a <br> is a real line.
+// Blocks highlighted by highlightElement() are skipped: it turns each stored <br>
+// into a newline, so their trailing newline is a real line too.
+export function stripTrailingCodeBlockNewlines(doc) {
+  for (const pre of doc.querySelectorAll("pre:not([data-highlighted])")) {
+    const last = lastDescendantOf(pre)
+    if (last.nodeType === Node.TEXT_NODE && last.nodeValue.endsWith("\n")) {
+      last.nodeValue = last.nodeValue.slice(0, -1)
+    }
+  }
+}
+
+// Browsers ignore spaces around a link's address when they follow it, but Lexical
+// doesn't: an address that doesn't start with a scheme gets https:// put in front,
+// so " https://example.com" becomes "https:// https://example.com", a dead link.
+export function trimLinkAddresses(doc) {
+  for (const link of doc.querySelectorAll("a[href]")) {
+    const href = link.getAttribute("href")
+    const trimmed = href.trim()
+    if (trimmed !== href) link.setAttribute("href", trimmed)
+  }
+}
+
+function lastDescendantOf(node) {
+  while (node.lastChild) node = node.lastChild
+  return node
+}
+
+export function generateDomId(prefix) {
+  const randomPart = Math.random().toString(36).slice(2, 10)
+  return `${prefix}-${randomPart}`
+}
+
+export function extractPlainTextFromHtml(innerHtml = "") {
+  return parseHtml(innerHtml).body.textContent.trim()
+}
+
+export function isActiveAndVisible(element) {
+  return element && !element.disabled && checkVisibility(element)
+}
+
+// no `checkVisibility` in Safari < 17.4
+// https://developer.mozilla.org/en-US/docs/Web/API/Element/checkVisibility#browser_compatibility
+function checkVisibility(element, options) {
+  if (element.checkVisibility) {
+    return element.checkVisibility(options)
+  } else {
+    if (options) throw new Error("Polyfilled checkVisibility does not support options")
+    // Will not work for body or a fixed position element child of the body
+    // which is OK since that doesn't apply in the toolbar where this is used
+    return Boolean(element.offsetParent)
+  }
+}

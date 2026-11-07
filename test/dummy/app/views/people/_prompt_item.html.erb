@@ -1,0 +1,16 @@
+<lexxy-prompt-item search="<%= "#{person.name} #{person.initials}" %>" sgid="<%= person.attachable_sgid %>">
+  <% avatar_id = 1 + rand(5) %>
+  <% user_avatar = asset_path("user-#{avatar_id}.jpg") %>
+  <template type="menu">
+    <span class="person person--prompt-item">
+      <img src="<%= user_avatar %>" class="person--avatar" alt="">
+      <span class="person--name"><%= person.name %></span>
+    </span>
+  </template>
+  <template type="editor">
+  <span class="person person--inline">
+    <img src="<%= user_avatar %>" class="person--avatar" alt="">
+    <span class="person--name"><%= person.name %></span>
+  </span>
+  </template>
+</lexxy-prompt-item>

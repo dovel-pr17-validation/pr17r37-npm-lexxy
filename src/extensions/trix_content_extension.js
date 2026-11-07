@@ -1,0 +1,61 @@
+import { defineExtension } from "lexical"
+import { CodeNode } from "@lexical/code"
+import { extendConversion, extendTextNodeConversion } from "../helpers/lexical_helper"
+import { importedCodeLanguage } from "../helpers/code_language_helper"
+import { $applyHighlightStyle } from "./highlight_extension"
+import LexxyExtension from "./lexxy_extension"
+
+export class TrixContentExtension extends LexxyExtension {
+
+  get enabled() {
+    return this.editorElement.supportsRichText
+  }
+
+  get lexicalExtension() {
+    return defineExtension({
+      name: "lexxy/trix-content",
+      html: {
+        import: {
+          em: (element) => onlyStyledElements(element, {
+            conversion: extendTextNodeConversion("i", $applyHighlightStyle),
+            priority: 1
+          }),
+          span: (element) => onlyStyledElements(element, {
+            conversion: extendTextNodeConversion("span", $applyHighlightStyle),
+            priority: 1
+          }),
+          strong: (element) => onlyStyledElements(element, {
+            conversion: extendTextNodeConversion("b", $applyHighlightStyle),
+            priority: 1
+          }),
+          del: () => ({
+            conversion: extendTextNodeConversion("s", $applyStrikethrough, $applyHighlightStyle),
+            priority: 1
+          }),
+          pre: (element) => onlyPreLanguageElements(element, {
+            conversion: extendConversion(CodeNode, "pre", $applyLanguage),
+            priority: 1
+          })
+        }
+      }
+    })
+  }
+}
+
+function onlyStyledElements(element, conversion) {
+  const elementHighlighted = element.style.color !== "" || element.style.backgroundColor !== ""
+  return elementHighlighted ? conversion : null
+}
+
+function $applyStrikethrough(textNode) {
+  if (!textNode.hasFormat("strikethrough")) textNode.toggleFormat("strikethrough")
+  return textNode
+}
+
+function onlyPreLanguageElements(element, conversion) {
+  return !element.hasAttribute("data-language") && importedCodeLanguage(element) ? conversion : null
+}
+
+function $applyLanguage(conversionOutput, element) {
+  conversionOutput.node.setLanguage(importedCodeLanguage(element))
+}

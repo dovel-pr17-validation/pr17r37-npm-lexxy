@@ -1,0 +1,21 @@
+<div class="container">
+  <%= link_to "← Back to posts", posts_path, class: "btn" %>
+
+  <% if notice.present? %>
+    <p class="notice"><%= notice %></p>
+  <% end %>
+
+  <header>
+    <h1><%= @post.title.presence || "Untitled" %></h1>
+    <div class="actions">
+      <%= link_to "Edit this post", edit_post_path(@post), class: "btn" %>
+      <%= button_to "Delete this post", @post, method: :delete, class: "btn btn--destroy" %>
+    </div>
+  </header>
+
+  <article class="post" id="<%= dom_id @post %>">
+    <div data-controller="code-highlight">
+      <%= @post.body %>
+    </div>
+  </article>
+</div>
